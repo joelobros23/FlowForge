@@ -1,38 +1,24 @@
-use eframe::{egui, App, Frame, NativeOptions};
-use egui::{Color32, Id, Pos2, Rect, Sense, Stroke, Ui, Vec2};
+use eframe::{egui, App, CreationContext};
+use egui::{Color32, Frame, Margin, Pos2, Rect, Rounding, Stroke, Ui, Vec2};
 use petgraph::Graph;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-fn main() {
-    let native_options = NativeOptions::default();
-    eframe::run_native(
-        "FlowForge",
-        native_options,
-        Box::new(|cc| Box::new(FlowForgeApp::new(cc))),
-    );
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct NodeData {
-    pub value: i32,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Node {
-    pub id: Uuid,
-    pub name: String,
-    pub position: Pos2,
-    pub data: NodeData,
+    id: Uuid,
+    name: String,
+    position: Pos2,
+    data: String,
 }
 
 impl Node {
-    pub fn new(name: String, position: Pos2) -> Self {
+    pub fn new(name: String, position: Pos2, data: String) -> Self {
         Node {
             id: Uuid::new_v4(),
             name,
             position,
-            data: NodeData { value: 0 },
+            data,
         }
     }
 }
@@ -46,85 +32,79 @@ impl<'a> NodeWidget<'a> {
         NodeWidget { node }
     }
 
-    fn show(&mut self, ui: &mut Ui) -> egui::Response {
-        let node_id = Id::new(self.node.id);
-        let desired_size = Vec2::new(100.0, 50.0);
+    fn show(&mut self, ui: &mut Ui) {
+        let frame = Frame::default()
+            .fill(Color32::LIGHT_BLUE)
+            .stroke(Stroke::new(1.0, Color32::BLACK))
+            .rounding(Rounding::same(5.0))
+            .margin(Margin::same(5.0));
 
-        let (rect, response) = ui.allocate_at_least(desired_size, Sense::click_and_drag());
+        let node_id = self.node.id;
+        let node_name = self.node.name.clone();
+        let node_pos = self.node.position;
 
-        let visuals = ui.style().interact(&response);
-        let rect = rect.expand(visuals.expansion);
-
-        ui.painter().rect(
-            rect,
-            5.0,
-            visuals.bg_fill,
-            Stroke::new(2.0, visuals.fg_stroke.color),
+        ui.allocate_ui_at_rect(
+            Rect::from_min_size(node_pos, Vec2::new(100.0, 50.0)),
+            |ui| {
+                frame.show(ui, |ui| {
+                    ui.set_width(100.0);
+                    ui.label(node_name);
+                    ui.label(format!("ID: {}", node_id));
+                    ui.label(format!("Data: {}", self.node.data));
+                });
+            },
         );
 
-        ui.allocate_ui_at_rect(rect, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.heading(&self.node.name);
-                ui.label(format!("Value: {}", self.node.data.value));
-            });
-        });
-
-        if response.dragged() {
-            self.node.position += response.drag_delta();
+        if ui
+            .rect_contains_pointer(Rect::from_min_size(node_pos, Vec2::new(100.0, 50.0)))
+            && ui.input(|i| i.pointer.is_dragging())
+        {
+            self.node.position += ui.input(|i| i.pointer.delta());
         }
-
-        response
     }
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct FlowForgeApp {
+#[derive(Default)]
+struct FlowForgeApp {
     nodes: Vec<Node>,
-    #[serde(skip)]
     graph: Graph<Uuid, ()>,
 }
 
 impl FlowForgeApp {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        // Customize egui here with cc.egui_ctx.set_visuals and cc.egui_ctx.set_fonts.
-
-        let mut app = FlowForgeApp {
-            nodes: vec![
-                Node::new("Node A".to_string(), Pos2::new(100.0, 100.0)),
-                Node::new("Node B".to_string(), Pos2::new(300.0, 200.0)),
-            ],
-            graph: Graph::new(),
-        };
-        app.build_graph();
-        app
-    }
-
-    fn build_graph(&mut self) {
-        self.graph = Graph::new();
-        let mut node_indices = std::collections::HashMap::new();
-        for node in &self.nodes {
-            let node_index = self.graph.add_node(node.id);
-            node_indices.insert(node.id, node_index);
-        }
-
-        // Example edge
-        if self.nodes.len() >= 2 {
-            if let (Some(&node_a_id), Some(&node_b_id)) = (node_indices.get(&self.nodes[0].id), node_indices.get(&self.nodes[1].id)) {
-                self.graph.add_edge(node_a_id, node_b_id, ());
-            }
-        }
+    fn new(_cc: &CreationContext<'_>) -> Self {
+        Default::default()
     }
 }
 
 impl App for FlowForgeApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("FlowForge");
 
+            if self.nodes.is_empty() {
+                self.nodes.push(Node::new("Node 1".to_string(), Pos2::new(100.0, 100.0), "Some Data".to_string()));
+                self.nodes.push(Node::new("Node 2".to_string(), Pos2::new(300.0, 150.0), "More Data".to_string()));
+            }
+
             for node in &mut self.nodes {
-                let mut widget = NodeWidget::new(node);
-                let response = widget.show(ui);
+                NodeWidget::new(node).show(ui);
             }
         });
     }
+}
+
+fn main() -> Result<(), eframe::Error> {
+    let options = eframe::NativeOptions {
+        initial_window_size: Some(egui::Vec2::new(800.0, 600.0)),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "FlowForge",
+        options,
+        Box::new(|cc| {
+            egui_extras::install_image_loaders(&cc.egui_ctx);
+            Box::new(FlowForgeApp::new(cc))
+        }),
+    )
 }
