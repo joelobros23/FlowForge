@@ -1,108 +1,171 @@
-use eframe::{egui, App, CreationContext, Frame};
-use egui::Color32;
+// src/main.rs
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
+
+use eframe::{egui, App, Frame, NativeOptions};
+use egui::{Color32, Pos2, Rect, Vec2, Sense};
 use serde::{Deserialize, Serialize};
+use serde_json;
 use uuid::Uuid;
 use petgraph::Graph;
+use petgraph::dot::{Dot, Config};
 
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Node {
+fn main() -> Result<(), eframe::Error> {
+    env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
+
+    let native_options = NativeOptions {
+        initial_window_size: Some(egui::Vec2::new(800.0, 600.0)),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "FlowForge",
+        native_options,
+        Box::new(|cc| {
+            // This gives us image support: egui_extras::install_image_loaders(&cc);
+            Box::new(FlowForgeApp::new(cc))
+        }),
+    )
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Node {
     id: Uuid,
     name: String,
-    #[serde(skip)] // Don't serialize position, as it's UI specific
-    position: egui::Pos2,
+    position: Pos2,
 }
 
 impl Node {
-    pub fn new(name: String, position: egui::Pos2) -> Self {
+    fn new(name: String, position: Pos2) -> Self {
         Node {
             id: Uuid::new_v4(),
-            name, position,
+            name,
+            position,
         }
     }
 }
 
-#[derive(Default, Serialize, Deserialize)]
-pub struct FlowForgeApp {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Edge {
+    source: Uuid,
+    target: Uuid,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Workflow {
     nodes: Vec<Node>,
+    edges: Vec<Edge>,
+}
+
+impl Workflow {
+    fn new() -> Self {
+        Workflow {
+            nodes: Vec::new(),
+            edges: Vec::new(),
+        }
+    }
+
+    fn add_node(&mut self, node: Node) {
+        self.nodes.push(node);
+    }
+
+    fn add_edge(&mut self, edge: Edge) {
+        self.edges.push(edge);
+    }
+}
+
+
+struct FlowForgeApp {
+    workflow: Workflow,
     node_palette: Vec<String>,
-    graph: Graph<Uuid, ()>,
     dragged_node: Option<String>,
 }
 
 impl FlowForgeApp {
-    pub fn new(_cc: &CreationContext<'_>) -> Self {
-        let mut app = Self::default();
-        app.node_palette = vec!["Input".to_string(), "Output".to_string(), "Transform".to_string()];
-        app
+    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        // Customize egui here with cc.egui_ctx.set_fonts and cc.egui_ctx.set_visuals.
+        // Restore app state using cc.storage (requires the "persistence" feature).
+        // cc.egui_ctx.set_visuals(egui::Visuals::dark());
+
+        FlowForgeApp {
+            workflow: Workflow::new(),
+            node_palette: vec!["Input".to_string(), "Transform".to_string(), "Output".to_string()],
+            dragged_node: None,
+        }
     }
 }
 
 impl App for FlowForgeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut Frame) {
-        egui::SidePanel::left("node_palette").show(ctx, |ui| {
-            ui.heading("Node Palette");
-            for node_type in &self.node_palette {
-                if ui.button(node_type).drag_source(|ui, _| {
-                    self.dragged_node = Some(node_type.clone());
-                    ui.label(format!("Dragging {}", node_type));
-                }).is_dragged() {
-                    // This needs to be non-empty to trigger dragging
-                }
-            }
+        egui::TopBottomPanel::top("top_panel").show(ctx, |ui| {
+            ui.heading("FlowForge");
         });
+
+        egui::SidePanel::left("node_palette")
+            .default_width(200.0)
+            .show(ctx, |ui| {
+                ui.heading("Node Palette");
+
+                for node_type in &self.node_palette {
+                    let response = ui.add(egui::Label::new(node_type).sense(Sense::drag()));
+
+                    if response.drag_started() {
+                        self.dragged_node = Some(node_type.clone());
+                    }
+                }
+            });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Workflow Editor");
 
-            let painter = ui.painter();
+            // Handle dropping nodes onto the canvas
+            let drop_position = ui.input(|i| i.pointer.hover_pos());
 
-            // Draw nodes
-            for node in &mut self.nodes {
-                let rect = egui::Rect::from_center_size(
-                    node.position,
-                    egui::Vec2::new(80.0, 40.0),
-                );
-                painter.rect_filled(rect, egui::Rounding::same(5.0), Color32::WHITE);
-                painter.rect_stroke(rect, egui::Rounding::same(5.0), egui::Stroke::new(1.0, Color32::BLACK));
-                painter.text(rect.center(), egui::Align2::CENTER_CENTER, &node.name, egui::FontId::default(), Color32::BLACK);
+            if let Some(pos) = drop_position {
+                if ui.input(|i| i.pointer.any_released()) {
+                    if let Some(node_type) = &self.dragged_node {
+                        self.workflow.add_node(Node::new(node_type.clone(), pos));
+                        self.dragged_node = None; // Reset dragged node
+                    }
+                }
+            }
 
-                let response = ui.allocate_rect(rect, egui::Sense::drag());
+            // Draw the nodes
+            for node in &self.workflow.nodes {
+                let node_rect = Rect::from_center_size(node.position, Vec2::new(80.0, 30.0));
+                let node_id = egui::Id::new(node.id);
+
+                let response = ui.allocate_rect(node_rect, Sense::click_and_drag());
+
+                if response.hovered() {
+                    ui.output_mut().cursor_icon = egui::CursorIcon::PointingHand;
+                }
+
                 if response.dragged() {
-                    node.position += response.drag_delta();
-                }
-            }
+                    let delta = response.drag_delta();
+                    // Update the node position directly.  A proper implementation would update
+                    // the node's position in the data model (self.workflow).
+                    let mut mutable_node = node.clone();
+                    mutable_node.position.x += delta.x;
+                    mutable_node.position.y += delta.y;
+                    //Find the node in the workflow and update the position
+                    if let Some(node_index) = self.workflow.nodes.iter().position(|n| n.id == node.id) {
+                        self.workflow.nodes[node_index].position = mutable_node.position;
+                    }
 
-            // Handle dropping new nodes
-            let drop_area = ui.available_rect_before_wrap();
-            let drop_response = ui.allocate_rect(drop_area, egui::Sense::hover());
-            if drop_response.hovered() && ui.input(|i| i.pointer.is_dragging()) {
-                ui.output_mut().cursor_icon = egui::CursorIcon::Move;
-            }
 
-            if drop_response.hovered() && ui.input(|i| i.pointer.any_released()) {
-                if let Some(node_type) = &self.dragged_node {
-                    let mouse_pos = ui.input(|i| i.pointer.latest_pos()).unwrap_or(egui::Pos2::ZERO);
-                    let new_node = Node::new(node_type.clone(), mouse_pos);
-                    self.nodes.push(new_node);
+                    response.request_repaint();
                 }
-                self.dragged_node = None; // Reset dragged node
+
+
+                ui.painter().rect_filled(node_rect, egui::Rounding::same(5.0), Color32::LIGHT_BLUE);
+                ui.painter().text(
+                    node_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    &node.name,
+                    egui::FontId::default(),
+                    Color32::BLACK,
+                );
             }
         });
     }
-}
-
-fn main() -> Result<(), eframe::Error> {
-    let options = eframe::NativeOptions {
-        initial_window_size: Some(egui::Vec2::new(800.0, 600.0)),
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "FlowForge",
-        options,
-        Box::new(|cc| {
-            egui_extras::install_image_loaders(&cc.env.http);
-            Box::new(FlowForgeApp::new(cc))
-        }),
-    )
 }
